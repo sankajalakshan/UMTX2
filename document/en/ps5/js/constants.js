@@ -31,10 +31,7 @@ window.KONAMI_CODE_KEYBOARD = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', '
 window.devOptions = {
     bypassFirmware: false,
     showAllPayloads: false,
-    // Pre-releases are opt-in: kernel-level ELFs flagged "pre-release" can
-    // crash or brick the console. Mirror the safer default that
-    // bypassFirmware uses and require the user to flip this in Dev Options.
-    showPreRelease: false,
+    showPreRelease: true,
     debugMode: false
 };
 

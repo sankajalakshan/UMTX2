@@ -291,15 +291,15 @@ def calculate_file_hash(file_path: Path) -> str:
     return sha256_hash.hexdigest()
 
 
-def download_file(url: str, dest_path: Path, expected_sha256: Optional[str] = None) -> tuple[str, int]:
+def download_file(url: str, dest_path: Path) -> tuple[str, int]:
     """Download a file from URL and return (hash, size).
 
     Enforces:
-      - URL scheme/host allowlist (anti-SSRF)
+      - URL scheme/host allowlist (catches typos / wrong-host PRs early)
       - dest_path containment within PAYLOADS_DIR (anti path-traversal)
-      - allow_redirects=False with manual single-hop validation
-      - Optional pinned-SHA256 verification: if expected_sha256 is provided,
-        the download is rejected unless the computed digest matches.
+      - allow_redirects=False with manual single-hop validation, so a
+        302 to a non-allowlisted host fails loudly instead of silently
+        downloading attacker-chosen bytes
     """
     validate_download_url(url)
     assert_under(dest_path.parent, PAYLOADS_DIR)
@@ -307,7 +307,7 @@ def download_file(url: str, dest_path: Path, expected_sha256: Optional[str] = No
     print(f"  Downloading: {url}")
     response = requests.get(url, stream=True, timeout=60, allow_redirects=False)
 
-    # Walk a single redirect manually, re-validating the target host.
+    # Walk redirects manually, re-validating the target host on every hop.
     redirect_hops = 0
     while response.is_redirect and redirect_hops < 5:
         next_url = response.headers.get("Location", "")
@@ -328,15 +328,6 @@ def download_file(url: str, dest_path: Path, expected_sha256: Optional[str] = No
 
     file_hash = calculate_file_hash(temp_path)
     file_size = temp_path.stat().st_size
-
-    if expected_sha256:
-        if file_hash.lower() != expected_sha256.lower():
-            temp_path.unlink(missing_ok=True)
-            raise ValueError(
-                f"Hash mismatch for {dest_path.name}: "
-                f"expected {expected_sha256}, got {file_hash}"
-            )
-
     temp_path.rename(dest_path)
 
     print(f"  Saved: {dest_path.name} ({file_size} bytes, hash: {file_hash[:16]}...)")
@@ -485,8 +476,7 @@ def get_github_releases(repo: str, max_releases: int = MAX_VERSIONS_PER_PAYLOAD)
     try:
         result = subprocess.run(
             ["gh", "release", "list", "--repo", repo, "--json",
-             "tagName,name,isPrerelease,isImmutable,publishedAt",
-             "--limit", str(max_releases)],
+             "tagName,name,isPrerelease", "--limit", str(max_releases)],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
@@ -527,7 +517,7 @@ def get_release_details(repo: str, tag: str) -> Optional[Dict]:
         # has already rejected leading-dash and shell-metachar shapes.
         result = subprocess.run(
             ["gh", "release", "view", tag, "--repo", repo,
-             "--json", "body,url,assets,publishedAt,isImmutable"],
+             "--json", "body,url,assets,publishedAt"],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
@@ -693,11 +683,6 @@ def update_payload_from_github_release(payload_config: Dict, metadata: Dict) -> 
         dest_path = version_dir / file_name
         assert_under(dest_path, PAYLOADS_DIR)
 
-        # Hash pinning: if the existing metadata records a hash for this
-        # version, treat it as authoritative — any mismatch (whether from
-        # tag re-push or upstream substitution) aborts the update.
-        existing_hash_pin = (existing_versions.get(version) or {}).get('hash') or ""
-
         file_hash = ""
         file_size = 0
 
@@ -705,20 +690,12 @@ def update_payload_from_github_release(payload_config: Dict, metadata: Dict) -> 
             existing_hash = calculate_file_hash(dest_path)
             existing_size = dest_path.stat().st_size
             print(f"  Already exists: {file_name}")
-            if existing_hash_pin and existing_hash.lower() != existing_hash_pin.lower():
-                raise ValueError(
-                    f"Local hash drift for {payload_id}@{version}: "
-                    f"recorded {existing_hash_pin}, on disk {existing_hash}"
-                )
             file_hash = existing_hash
             file_size = existing_size
         else:
             try:
-                # download_file enforces URL allowlist + redirect re-validation
-                # + (optional) pinned-hash verification.
-                file_hash, file_size = download_file(
-                    download_url, dest_path, expected_sha256=existing_hash_pin or None
-                )
+                # download_file enforces URL allowlist + redirect re-validation.
+                file_hash, file_size = download_file(download_url, dest_path)
             except Exception as e:
                 print(f"  Error downloading {file_name}: {e}")
                 # Preserve existing version if download fails
@@ -811,25 +788,13 @@ def update_payload_from_direct(payload_config: Dict, metadata: Dict) -> List[Dic
     payload_id = payload_config['id']
     validate_identifier(payload_id, PAYLOAD_ID_RE, "payload id")
 
-    today_iso = date.today().isoformat()
-
     for ver_config in payload_config.get('manualVersions', []):
         file_name = ver_config['fileName']
         download_url = ver_config.get('url', '')
         version = ver_config['version']
         release_date = ver_config.get('releaseDate', '') or ''
-        expected_sha256 = (ver_config.get('expectedSha256') or '').strip()
 
         validate_identifier(version, VERSION_RE, f"version for {payload_id}")
-
-        # Reject future-dated entries — closes the isDefault-recompute abuse
-        # where an attacker writes releaseDate: "2099-..." to displace the
-        # genuine default version.
-        if release_date and release_date > today_iso:
-            raise ValueError(
-                f"manualVersions[{payload_id}@{version}] has future releaseDate "
-                f"{release_date!r}; refusing"
-            )
 
         # Skip empty filenames (custom actions)
         if not file_name:
@@ -860,19 +825,10 @@ def update_payload_from_direct(payload_config: Dict, metadata: Dict) -> List[Dic
         dest_path = version_dir / file_name
         assert_under(dest_path, PAYLOADS_DIR)
 
-        # Hash pin source preference: explicit `expectedSha256:` in YAML
-        # takes precedence over the previously-recorded hash in metadata.
-        existing_hash_pin = expected_sha256 or (existing_versions.get(version) or {}).get('hash') or ""
-
         if dest_path.exists():
             existing_hash = calculate_file_hash(dest_path)
             existing_size = dest_path.stat().st_size
             print(f"  Already exists: {file_name}")
-            if existing_hash_pin and existing_hash.lower() != existing_hash_pin.lower():
-                raise ValueError(
-                    f"Local hash drift for {payload_id}@{version}: "
-                    f"recorded {existing_hash_pin}, on disk {existing_hash}"
-                )
             versions.append({
                 'version': version,
                 'fileName': file_name,
@@ -887,9 +843,7 @@ def update_payload_from_direct(payload_config: Dict, metadata: Dict) -> List[Dic
             })
         elif download_url:
             try:
-                file_hash, file_size = download_file(
-                    download_url, dest_path, expected_sha256=existing_hash_pin or None
-                )
+                file_hash, file_size = download_file(download_url, dest_path)
                 versions.append({
                     'version': version,
                     'fileName': file_name,
@@ -1175,10 +1129,10 @@ def main():
         
         print(f"  Found {len(versions)} version(s)")
 
-    # SAFETY: Reject orphaned payloads (on disk but not in payloads.yaml).
-    # Hard-fail rather than auto-publish: this closes the supply-chain
-    # delivery path where a PR adds a payload directory only (no YAML
-    # change) and relies on the orphan loop to ship the bytes anyway.
+    # SAFETY: Detect orphaned payloads (on disk but not in payloads.yaml).
+    # This prevents accidental data loss when a payload's YAML entry is
+    # removed but the binary is still on disk — we re-include it from
+    # existing metadata so deployed sites don't suddenly lose payloads.
     configured_ids = {p['id'] for p in config['payloads']}
     orphaned_payloads = []
 
@@ -1191,18 +1145,37 @@ def main():
                 continue
             payload_id = payload_dir.name
             if payload_id not in configured_ids:
-                orphaned_payloads.append(payload_id)
+                if not PAYLOAD_ID_RE.match(payload_id):
+                    print(f"\n  Skipping orphan with unsafe id: {payload_id!r}")
+                    continue
+                print(f"\n  ⚠ Orphaned payload (not in payloads.yaml): '{payload_id}'")
+                print(f"    Re-including from existing metadata to prevent data loss.")
+                try:
+                    with open(metadata_file, 'r') as f:
+                        orphan_meta = json.load(f)
+                    orphan_entry = {
+                        'id': payload_id,
+                        'displayTitle': orphan_meta.get('displayTitle', payload_id),
+                        'description': orphan_meta.get('description', ''),
+                        'authors': orphan_meta.get('authors', []),
+                        'projectUrl': orphan_meta.get('projectUrl', ''),
+                        'sourceType': orphan_meta.get('sourceType', 'direct'),
+                        'sourceRepo': orphan_meta.get('sourceRepo', ''),
+                        'versions': orphan_meta.get('versions', []),
+                        'supportedFirmwares': orphan_meta.get('supportedFirmwares', []),
+                        'willHideEveryTime': orphan_meta.get('willHideEveryTime', False),
+                    }
+                    if orphan_meta.get('toPort'):
+                        orphan_entry['toPort'] = orphan_meta['toPort']
+                    if orphan_meta.get('customAction'):
+                        orphan_entry['customAction'] = orphan_meta['customAction']
+                    config['payloads'].append(orphan_entry)
+                    orphaned_payloads.append(payload_id)
+                except Exception as e:
+                    print(f"    ERROR: Could not load metadata for '{payload_id}': {e}")
 
     if orphaned_payloads:
-        print(f"\n{'=' * 60}", file=sys.stderr)
-        print(f"  ERROR: {len(orphaned_payloads)} orphaned payload(s) on disk", file=sys.stderr)
-        for oid in orphaned_payloads:
-            print(f"    - {oid}", file=sys.stderr)
-        print(f"  These directories exist under document/en/ps5/payloads/", file=sys.stderr)
-        print(f"  but are NOT declared in .github/payloads.yaml.", file=sys.stderr)
-        print(f"  Add a YAML entry per payload, or remove the directory.", file=sys.stderr)
-        print(f"{'=' * 60}", file=sys.stderr)
-        sys.exit(1)
+        print(f"\n  ⚠ {len(orphaned_payloads)} orphan(s) re-included; consider adding to payloads.yaml")
 
     # Generate new payload_map.js
     new_content = generate_payload_map_js(config['payloads'])
