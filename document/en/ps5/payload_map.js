@@ -1418,6 +1418,33 @@ const payload_map = [
         visible: true
     },
     {
+        id: "kcc",
+        displayTitle: "Kcc",
+        description: "Kcc",
+        author: "Kcc",
+        authors: [{"name": "Kcc", "github": "https://github.com/BestPig", "role": "Developer"}],
+        projectUrl: "https://github.com/kcc/kcc",
+        license: {type: "GPL-3.0", url: "https://github.com/kcc/blob/main/LICENSE"},
+        sourceType: "github-release",
+        sourceRepo: "kcc/kcc",
+        versions: [
+            {
+                version: "1.0",
+                fileName: "kcc.elf",
+                filePath: "payloads/kcc/1.0/kcc.elf",
+                downloadUrl: "https://github.com/download/1.0/kcc.elf",
+                hash: "776dd1885ef6aebec55e12a71b32a66bf0e1cafb9146960a51b231fd52b914fe",
+                fileSize: 116184,
+                releaseDate: "2026-04-30",
+                isDefault: true,
+                isPreRelease: false,
+                changelog: ["kcc"]
+            },
+        ],
+        toPort: 9021,
+        visible: true
+    },
+    {
         id: "kstuff-lite",
         displayTitle: "kstuff-lite (drakmor fork)",
         description: "FPKG enabler - Performance optimized fork with 1.5-2x speed improvement",
