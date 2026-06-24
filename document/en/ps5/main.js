@@ -1188,21 +1188,35 @@ async function main(userlandRW, wkOnly = false) {
         queue.push({ payload_info, toast });
     });
 
-    console.log("AUTOLOAD CODE REACHED");
-    // Auto-launch Payload Manager
-    const pm = payload_map.find(p => p.id === "payload-manager");
     
-    const version = pm.versions.find(v => v.isDefault) || pm.versions[0];
+    function queuePayload(id, title) {
+        const p = payload_map.find(x => x.id === id);
     
-    queue.push({
-        payload_info: {
-            ...pm,
-            ...version
-        },
-        toast: showToast("Payload Manager: Auto-launching...", -1)
-    });   
+        if (!p) {
+            console.log(`Payload not found: ${id}`);
+            return;
+        }
     
-    // await log("Done, switching to payloads screen...", LogLevel.INFO);
+        const v =
+            p.versions.find(x => x.isDefault) ||
+            p.versions[0];
+    
+        queue.push({
+            payload_info: {
+                ...p,
+                ...v
+            },
+            toast: showToast(`${title}: Auto-launching...`, -1)
+        });
+    }
+    
+    // Load payloads in order
+    queuePayload("etahen", "etaHEN");
+    queuePayload("websrv", "WebSrv");
+    queuePayload("ftpsrv", "FTP Server");
+    queuePayload("shadowmountplus", "ShadowMount+");
+    queuePayload("backpork", "BackPork");
+    
     await new Promise(resolve => setTimeout(resolve, 300));
     await switchPage("payloads-view");
 
